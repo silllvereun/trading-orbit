@@ -183,7 +183,52 @@ KYC 사용자
 - 공개 저장소에는 `.env.example`만 둘 수 있으며, 실제 `.env`는 커밋 금지다.
 - GitHub Secret Scanning과 Push Protection을 활성화한다.
 
-## 10. 권장 구현 순서
+
+### Row Level Security (RLS) 정책
+
+PostgreSQL RLS를 적용하여 애플리케이션 실수나 API 취약점이 발생해도 다른 사용자의 API Key·포지션·거래 내역을 조회하거나 수정할 수 없게 한다.
+
+- 테넌트 데이터 테이블에는 `user_id`를 필수로 두고, API Key 하위 데이터에는 `api_credential_id`와 `worker_id`를 함께 기록한다.
+- RLS 적용 대상: `exchange_accounts`, `api_credentials`, `trading_workers`, `strategies`, `signals`, `orders`, `fills`, `positions`, `trade_results`, `risk_events`, `cooldowns`, `audit_logs`.
+- 사용자 요청은 트랜잭션 시작 시 인증된 사용자 ID와 역할을 DB 세션 변수에 설정하고, `user_id = current_setting('app.user_id')` 조건의 정책으로 조회·수정 범위를 제한한다.
+- 일반 애플리케이션 DB 역할에는 `BYPASSRLS` 권한을 부여하지 않는다.
+- 관리자는 별도 관리자 역할과 감사 로그를 통해서만 범위가 확장된다.
+- Worker는 자신에게 할당된 `worker_id`와 연결된 API Key 데이터만 접근하도록 별도 정책을 둔다.
+- 관리자·Worker의 모든 범위 확장 조회/수정은 `audit_logs`에 남긴다.
+- `SECURITY DEFINER` 함수는 최소화하고, 사용 시 검색 경로 고정·권한·입력값 검증을 명시한다.
+
+
+
+## 10. Docker Image 기반 SSH 자동 배포
+
+초기 운영 배포는 GitHub Actions가 Docker Image를 빌드하고, 검증 후 SSH로 운영 서버에 접속해 버전을 교체하는 방식으로 구성한다.
+
+```
+main 브랜치 Merge
+  → CI 테스트·보안 검사
+  → Docker Image Build
+  → GitHub Container Registry(GHCR) Push
+  → SSH 배포 서버 접속
+  → Image SHA Pull
+  → DB Migration
+  → docker compose up -d
+  → Health Check
+  → 성공/실패 알림 및 필요 시 Rollback
+```
+
+### 배포 원칙
+
+- `latest` 태그 대신 commit SHA 또는 release version의 **불변 Image 태그**로 배포한다.
+- GitHub Actions는 테스트·빌드·이미지 푸시까지만 담당하고, 실제 Secret은 서버의 Secret Manager/Vault 또는 보호된 환경 파일에서 주입한다.
+- SSH private key, 서버 주소, GHCR 인증 정보는 GitHub Actions Secrets에만 저장하며 로그에 출력하지 않는다.
+- SSH는 host key 검증을 적용하고, 배포 전용 사용자에게 필요한 Docker 권한만 부여한다.
+- `docker compose` 서비스에는 healthcheck를 정의하고, API/Worker가 정상 상태일 때만 배포 성공으로 처리한다.
+- DB migration은 애플리케이션 시작 전 또는 별도 migration job으로 단일 실행한다. 여러 Worker가 동시에 migration을 실행하면 안 된다.
+- 실패 시 직전 정상 Image SHA로 즉시 rollback할 수 있도록 배포 이력을 저장한다.
+- Worker 재배포 전에는 신규 진입을 잠시 중지하고, 미체결 주문·활성 포지션을 거래소와 동기화한 뒤 재개한다.
+- 운영 환경은 Nginx 또는 Load Balancer 뒤에 두고 HTTPS만 허용한다.
+
+## 11. 권장 구현 순서
 
 1. 공통 DB 스키마, 인증/권한, API Key 암호화
 2. Gate.io 단일 거래소 어댑터 및 Paper Trading
@@ -196,7 +241,7 @@ KYC 사용자
 9. 백테스트·부하·장애복구·중복이벤트 테스트
 10. 제한 운영 후 실거래 전환
 
-## 11. 완료 기준
+## 12. 완료 기준
 
 - [ ] 3개 거래소 API Key를 사용자별로 안전하게 여러 개 연결할 수 있다.
 - [ ] API Key 1개당 독립 Worker가 기동·중지·복구된다.
@@ -206,3 +251,5 @@ KYC 사용자
 - [ ] Hard SL, 노출/손실 한도, 긴급 중지 기능이 동작한다.
 - [ ] PC와 모바일에서 대시보드와 로그를 읽고 안전하게 제어할 수 있다.
 - [ ] Paper Trading, 재기동 복구, API 오류, 중복 이벤트, 부하 테스트를 통과한다.
+- [ ] Docker Image SHA 기반 SSH 자동 배포·Health Check·Rollback이 동작한다.
+- [ ] RLS 정책으로 사용자·API Key·Worker 데이터 경계가 DB 레벨에서 강제된다.
